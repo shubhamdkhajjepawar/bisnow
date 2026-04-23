@@ -1,0 +1,502 @@
+"use strict";
+
+const express = require("express");
+const puppeteer = require("puppeteer");
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.PROXY_TOKEN || "change-me-secret-token";
+
+// ─────────────────────────────────────────
+// SCRAPE DEAL SHEET DATA
+// ─────────────────────────────────────────
+async function scrapeDeals() {
+
+  const browser = await puppeteer.launch({
+    headless: "new", // works on Render/servers
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  });
+
+  const page = await browser.newPage();
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+  );
+
+  console.log("Opening Bisnow...");
+
+  await page.goto("https://www.bisnow.com/dallas-ft-worth", {
+    waitUntil: "networkidle2",
+    timeout: 0
+  });
+
+  // ───────────────────────────────────────
+  // SCROLL TO LOAD MORE DATA
+  // ───────────────────────────────────────
+  for (let i = 0; i < 8; i++) {
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight);
+    });
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  console.log("Extracting links...");
+
+  // ───────────────────────────────────────
+  // EXTRACT DEAL SHEET LINKS
+  // ───────────────────────────────────────
+  const deals = await page.evaluate(() => {
+
+    const results = [];
+
+    document.querySelectorAll("a").forEach(el => {
+
+      const href = el.href;
+      const title = el.innerText.trim();
+
+      if (
+        href &&
+        href.includes("/news/deal-sheet/") &&
+        title.length > 20
+      ) {
+        results.push({
+          title,
+          url: href
+        });
+      }
+    });
+
+    // remove duplicates
+    return Array.from(
+      new Map(results.map(d => [d.url, d])).values()
+    );
+  });
+
+  console.log("Deals found:", deals.length);
+
+  // ───────────────────────────────────────
+  // ENRICH DATA (LEASE / SALES)
+  // ───────────────────────────────────────
+  const final = [];
+
+  for (let deal of deals.slice(0, 20)) {
+
+    try {
+      const page2 = await browser.newPage();
+
+      await page2.goto(deal.url, {
+        waitUntil: "domcontentloaded"
+      });
+
+      const text = await page2.evaluate(() =>
+        document.body.innerText.toLowerCase()
+      );
+
+      await page2.close();
+
+      final.push({
+        title: deal.title,
+        url: deal.url,
+        lease: text.includes("lease"),
+        sales: text.includes("sale")
+      });
+
+    } catch (e) {
+      final.push({
+        ...deal,
+        lease: false,
+        sales: false
+      });
+    }
+  }
+
+  await browser.close();
+
+  return final;
+}
+
+// ─────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────
+function checkToken(req, res, next) {
+  const token = req.headers["x-proxy-token"];
+
+  if (!token || token !== TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+}
+
+// ─────────────────────────────────────────
+// API
+// ─────────────────────────────────────────
+app.get("/deals", checkToken, async (req, res) => {
+
+  try {
+    const data = await scrapeDeals();
+
+    res.json({
+      count: data.length,
+      data: data
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────
+app.get("/health", (req, res) => {
+  res.json({ status: "OK" });
+});
+
+// ─────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+//new code
+
+"use strict";
+
+const express = require("express");
+const puppeteer = require("puppeteer");
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.PROXY_TOKEN || "change-me-secret-token";
+
+// ─────────────────────────────────────────
+// SMART SCROLL FUNCTION
+// ─────────────────────────────────────────
+async function autoScroll(page) {
+  let lastCount = 0;
+
+  for (let i = 0; i < 20; i++) {
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const count = await page.evaluate(() =>
+      document.querySelectorAll("a[href*='/news/deal-sheet/']").length
+    );
+
+    console.log("Loaded deals:", count);
+
+    if (count === lastCount) {
+      console.log("No more new data");
+      break;
+    }
+
+    lastCount = count;
+  }
+}
+
+// ─────────────────────────────────────────
+// MAIN SCRAPER
+// ─────────────────────────────────────────
+async function scrapeDeals() {
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+
+  const page = await browser.newPage();
+
+  await page.setViewport({ width: 1366, height: 900 });
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+  );
+
+  console.log("Opening Bisnow...");
+
+  await page.goto("https://www.bisnow.com/dallas-ft-worth", {
+    waitUntil: "networkidle2",
+    timeout: 0,
+  });
+
+  // ✅ Load all items
+  await autoScroll(page);
+
+  console.log("Extracting links...");
+
+  const deals = await page.evaluate(() => {
+    const results = [];
+
+    document
+      .querySelectorAll("a[href*='/news/deal-sheet/']")
+      .forEach((el) => {
+        const href = el.href;
+        const title = el.innerText.trim();
+
+        if (href && title.length > 20) {
+          results.push({
+            title,
+            url: href,
+          });
+        }
+      });
+
+    return Array.from(new Map(results.map((d) => [d.url, d])).values());
+  });
+
+  console.log("Deals found:", deals.length);
+
+  // ───────────────────────────────────────
+  // ENRICH DATA (PARALLEL - FAST)
+  // ───────────────────────────────────────
+  const enriched = await Promise.all(
+    deals.slice(0, 25).map(async (deal) => {
+      try {
+        const page2 = await browser.newPage();
+
+        await page2.goto(deal.url, {
+          waitUntil: "domcontentloaded",
+        });
+
+        const text = await page2.evaluate(() =>
+          document.body.innerText.toLowerCase()
+        );
+
+        await page2.close();
+
+        return {
+          title: deal.title,
+          url: deal.url,
+          lease: text.includes("lease"),
+          sales:
+            text.includes("sale") ||
+            text.includes("sold") ||
+            text.includes("acquired"),
+        };
+      } catch (e) {
+        return {
+          ...deal,
+          lease: false,
+          sales: false,
+        };
+      }
+    })
+  );
+
+  await browser.close();
+
+  return enriched;
+}
+
+// ─────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────
+function checkToken(req, res, next) {
+  const token = req.headers["x-proxy-token"];
+
+  if (!token || token !== TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+}
+
+// ─────────────────────────────────────────
+// API
+// ─────────────────────────────────────────
+app.get("/deals", checkToken, async (req, res) => {
+  try {
+    const data = await scrapeDeals();
+
+    res.json({
+      count: data.length,
+      data: data,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────
+app.get("/health", (req, res) => {
+  res.json({ status: "OK" });
+});
+
+// ─────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+//updated 14:05
+
+"use strict";
+
+const express = require("express");
+const puppeteer = require("puppeteer");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.PROXY_TOKEN || "change-me-secret-token";
+
+// ─────────────────────────────────────────
+// SCROLL
+// ─────────────────────────────────────────
+async function autoScroll(page) {
+  let lastCount = 0;
+
+  for (let i = 0; i < 25; i++) {
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(r => setTimeout(r, 3000));
+
+    const count = await page.evaluate(() =>
+      document.querySelectorAll("a[href*='/news/deal-sheet/']").length
+    );
+
+    if (count === lastCount) break;
+    lastCount = count;
+  }
+}
+
+// ─────────────────────────────────────────
+// NORMALIZATION HELPERS
+// ─────────────────────────────────────────
+function parseNumber(str) {
+  if (!str) return null;
+  return Number(str.replace(/[^0-9.]/g, ""));
+}
+
+function parsePrice(text) {
+  const match = text.match(/\$([\d,.]+)\s*(million|billion)?/i);
+  if (!match) return null;
+
+  let value = parseNumber(match[1]);
+
+  if (match[2]) {
+    if (match[2].toLowerCase() === "million") value *= 1_000_000;
+    if (match[2].toLowerCase() === "billion") value *= 1_000_000_000;
+  }
+
+  return value;
+}
+
+function parseSize(text) {
+  const match = text.match(/([\d,]+)\s*(SF|square feet)/i);
+  return match ? parseNumber(match[1]) : null;
+}
+
+// ─────────────────────────────────────────
+// ENTITY EXTRACTION
+// ─────────────────────────────────────────
+function extractEntities(text) {
+  const lower = text.toLowerCase();
+
+  let type = null;
+  if (lower.includes("lease")) type = "Lease";
+  if (lower.includes("sold") || lower.includes("acquired")) type = "Sale";
+
+  const tenantMatch = text.match(/([A-Z][A-Za-z&.\s]+?) (leased|signed a lease)/);
+  const buyerMatch = text.match(/([A-Z][A-Za-z&.\s]+?) (acquired|bought)/);
+  const sellerMatch = text.match(/from ([A-Z][A-Za-z&.\s]+)/);
+
+  return {
+    type,
+    tenant: tenantMatch ? tenantMatch[1].trim() : null,
+    buyer: buyerMatch ? buyerMatch[1].trim() : null,
+    seller: sellerMatch ? sellerMatch[1].trim() : null,
+    price: parsePrice(text),
+    size: parseSize(text),
+    raw: text
+  };
+}
+
+// ─────────────────────────────────────────
+// PARSE ARTICLE
+// ─────────────────────────────────────────
+async function parseArticle(browser, deal) {
+  const page = await browser.newPage();
+
+  await page.goto(deal.url, { waitUntil: "domcontentloaded" });
+
+  const paragraphs = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("p"))
+      .map(p => p.innerText.trim())
+      .filter(p => p.length > 60)
+  );
+
+  await page.close();
+
+  const structured = paragraphs
+    .map(extractEntities)
+    .filter(d => d.type);
+
+  return {
+    title: deal.title,
+    url: deal.url,
+    deals: structured
+  };
+}
+
+// ─────────────────────────────────────────
+// MAIN SCRAPER
+// ─────────────────────────────────────────
+async function scrapeDeals() {
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox"]
+  });
+
+  const page = await browser.newPage();
+
+  await page.setViewport({ width: 1366, height: 900 });
+
+  await page.goto("https://www.bisnow.com/dallas-ft-worth", {
+    waitUntil: "networkidle2"
+  });
+
+  await autoScroll(page);
+
+  const deals = await page.evaluate(() =>
+    Array.from(
+      new Map(
+        [...document.querySelectorAll("a[href*='/news/deal-sheet/']")]
+          .map(el => ({
+            title: el.innerText.trim(),
+            url: el.href
+          }))
+          .filter(d => d.title.length > 20)
+          .map(d => [d.url, d])
+      ).values()
+    )
+  );
+
+  const enriched = await Promise.all(
+    deals.slice(0, 20).map(d => parseArticle(browser, d))
+  );
+
+  await browser.close();
+
+  return enriched;
+}
+
+// ─────────────────────────────────────────
+// API
+// ─────────────────────────────────────────
+app.get("/deals", async (req, res) => {
+  try {
+    if (req.headers["x-proxy-token"] !== TOKEN) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const data = await scrapeDeals();
+
+    res.json({ count: data.length, data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.listen(PORT, () => console.log("Server running"));
