@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.PROXY_TOKEN || "change-me-secret-token";
 
 // ─────────────────────────────────────────
-// IN-MEMORY CACHE (IMPORTANT)
+// CACHE
 // ─────────────────────────────────────────
 let CACHE = {
   data: [],
@@ -16,7 +16,7 @@ let CACHE = {
 };
 
 // ─────────────────────────────────────────
-// SMART SCROLL (LOAD ALL DATA)
+// SCROLL
 // ─────────────────────────────────────────
 async function autoScroll(page) {
   let lastCount = 0;
@@ -29,38 +29,83 @@ async function autoScroll(page) {
       document.querySelectorAll("a[href*='/news/deal-sheet/']").length
     );
 
-    console.log("Loaded:", count);
-
     if (count === lastCount) break;
     lastCount = count;
   }
 }
 
 // ─────────────────────────────────────────
-// STRUCTURED PARSER
+// HELPER FUNCTIONS
 // ─────────────────────────────────────────
-function extractDeals(text) {
-  const lower = text.toLowerCase();
+function extractCompany(text, keywords) {
+  for (let k of keywords) {
+    const regex = new RegExp(`([A-Z][A-Za-z&.\\s]+?)\\s${k}`, "i");
+    const match = text.match(regex);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
 
-  let type = null;
-  if (lower.includes("lease")) type = "Lease";
-  if (lower.includes("sold") || lower.includes("acquired")) type = "Sale";
+function extractAfter(text, word) {
+  const regex = new RegExp(`${word}\\s([A-Z][A-Za-z&.\\s]+)`, "i");
+  const match = text.match(regex);
+  return match ? match[1].trim() : null;
+}
 
-  if (!type) return null;
+function extractSize(text) {
+  const match = text.match(/([\d,]+)\s*(SF|square feet)/i);
+  return match ? match[1].replace(/,/g, "") : null;
+}
 
-  const priceMatch = text.match(/\$[\d,.]+ ?(million|billion)?/i);
-  const sizeMatch = text.match(/([\d,]+)\s*(SF|square feet)/i);
-
-  return {
-    type,
-    price: priceMatch ? priceMatch[0] : null,
-    size: sizeMatch ? sizeMatch[0] : null,
-    details: text
-  };
+function extractPrice(text) {
+  const match = text.match(/\$[\d,.]+ ?(million|billion)?/i);
+  return match ? match[0] : null;
 }
 
 // ─────────────────────────────────────────
-// SCRAPER (RUN ONCE)
+// ADVANCED DEAL PARSER
+// ─────────────────────────────────────────
+function extractDealsFromParagraph(text) {
+  const lower = text.toLowerCase();
+  const deals = [];
+
+  // LEASE
+  if (
+    lower.includes("lease") ||
+    lower.includes("leased") ||
+    lower.includes("tenant")
+  ) {
+    deals.push({
+      type: "Lease",
+      tenant: extractCompany(text, ["leased", "signed"]),
+      landlord: extractAfter(text, "from"),
+      size: extractSize(text),
+      price: extractPrice(text),
+      details: text
+    });
+  }
+
+  // SALE
+  if (
+    lower.includes("sold") ||
+    lower.includes("acquired") ||
+    lower.includes("bought")
+  ) {
+    deals.push({
+      type: "Sale",
+      buyer: extractCompany(text, ["acquired", "bought"]),
+      seller: extractAfter(text, "from"),
+      size: extractSize(text),
+      price: extractPrice(text),
+      details: text
+    });
+  }
+
+  return deals;
+}
+
+// ─────────────────────────────────────────
+// SCRAPER
 // ─────────────────────────────────────────
 async function scrapeDeals() {
   console.log("Running scraper...");
@@ -80,7 +125,7 @@ async function scrapeDeals() {
 
   await autoScroll(page);
 
-  // Extract links
+  // Extract deal sheet links
   const deals = await page.evaluate(() =>
     Array.from(
       new Map(
@@ -97,7 +142,6 @@ async function scrapeDeals() {
 
   console.log("Total links:", deals.length);
 
-  // Extract details
   const results = [];
 
   for (let deal of deals.slice(0, 40)) {
@@ -114,14 +158,19 @@ async function scrapeDeals() {
 
       await p.close();
 
-      const structured = paragraphs
-        .map(extractDeals)
-        .filter(d => d);
+      const structuredDeals = [];
+
+      paragraphs.forEach(p => {
+        const extracted = extractDealsFromParagraph(p);
+        if (extracted.length > 0) {
+          structuredDeals.push(...extracted);
+        }
+      });
 
       results.push({
         title: deal.title,
         url: deal.url,
-        deals: structured
+        deals: structuredDeals
       });
 
     } catch (e) {
@@ -150,24 +199,36 @@ function checkToken(req, res, next) {
 }
 
 // ─────────────────────────────────────────
-// GET DEALS (PAGINATION)
+// API (PAGINATION)
 // ─────────────────────────────────────────
 app.get("/deals", checkToken, async (req, res) => {
   try {
-    const offset = parseInt(req.query.offset || "0");
-    const limit = parseInt(req.query.limit || "10");
+    let offset = parseInt(req.query.offset || "0");
+    let limit = parseInt(req.query.limit || "10");
 
-    // If cache empty → scrape once
     if (CACHE.data.length === 0) {
       await scrapeDeals();
+    }
+
+    const total = CACHE.data.length;
+
+    if (offset >= total) {
+      return res.json({
+        total,
+        offset,
+        limit,
+        hasMore: false,
+        data: []
+      });
     }
 
     const paginated = CACHE.data.slice(offset, offset + limit);
 
     res.json({
-      total: CACHE.data.length,
+      total,
       offset,
       limit,
+      hasMore: offset + limit < total,
       lastUpdated: CACHE.lastUpdated,
       data: paginated
     });
@@ -178,7 +239,7 @@ app.get("/deals", checkToken, async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-// MANUAL REFRESH (OPTIONAL)
+// REFRESH
 // ─────────────────────────────────────────
 app.get("/refresh", checkToken, async (req, res) => {
   await scrapeDeals();
